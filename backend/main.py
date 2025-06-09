@@ -11,6 +11,7 @@ import pty
 import signal
 import threading
 import subprocess
+import fcntl
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, AsyncGenerator
@@ -137,7 +138,6 @@ class ShellSession:
                 logger.info(f"📖 DEBUG: Starting read_from_shell task for shell {self.shell_id}")
                 try:
                     # Set PTY master to non-blocking mode
-                    import fcntl
                     flags = fcntl.fcntl(master, fcntl.F_GETFL)
                     fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
                     logger.info(f"📖 DEBUG: Set PTY master {master} to non-blocking mode for shell {self.shell_id}")
@@ -397,7 +397,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],  # React dev servers
+    allow_origins=["http://localhost:3000", "http://localhost:5173", "ws://localhost:3000", "ws://localhost:5173"],  # React dev servers
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1147,6 +1147,8 @@ async def delete_shell_session(shell_id: str):
 async def shell_websocket_endpoint(websocket: WebSocket, shell_id: str):
     """WebSocket endpoint for interactive shell communication"""
     logger.info(f"🌐 DEBUG: WebSocket connection attempt for shell {shell_id}")
+    shell_session = None
+    
     try:
         # Validate shell exists
         logger.info(f"🌐 DEBUG: Validating shell {shell_id} exists in ACTIVE_SHELLS")
@@ -1183,14 +1185,28 @@ async def shell_websocket_endpoint(websocket: WebSocket, shell_id: str):
         
     except WebSocketDisconnect:
         logger.info(f"🌐 DEBUG: Shell WebSocket disconnected for {shell_id}")
-        manager.disconnect_shell(shell_id)
     except Exception as e:
         logger.error(f"🌐 DEBUG: Shell WebSocket error for {shell_id}: {e}", exc_info=True)
         try:
             await websocket.close(code=1011, reason=f"Internal error: {str(e)}")
         except Exception as close_error:
             logger.warning(f"🌐 DEBUG: Error closing WebSocket for shell {shell_id}: {close_error}")
+    finally:
+        # Clean up WebSocket connection
         manager.disconnect_shell(shell_id)
+        
+        # Clean up shell session if needed
+        if shell_session:
+            logger.info(f"🌐 DEBUG: Cleaning up shell session {shell_id}")
+            try:
+                shell_session.cleanup()
+            except Exception as cleanup_error:
+                logger.warning(f"🌐 DEBUG: Error cleaning up shell session {shell_id}: {cleanup_error}")
+        
+        # Remove from active shells if connection failed
+        if shell_id in ACTIVE_SHELLS:
+            logger.info(f"🌐 DEBUG: Removing shell {shell_id} from ACTIVE_SHELLS")
+            del ACTIVE_SHELLS[shell_id]
 
 # ============================================================================
 # HEALTH CHECK
