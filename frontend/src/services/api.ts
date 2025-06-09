@@ -12,6 +12,8 @@ import type {
   GrepResponse,
   ShellCommand,
   ShellResponse,
+  ShellSession,
+  ShellListResponse,
   ProcessLogsResponse,
   ProcessStopResponse,
   HealthResponse,
@@ -204,6 +206,71 @@ class CrogiaAPI {
       method: "POST",
       body: JSON.stringify(shellCommand),
     });
+  }
+
+  // Terminal Shell Sessions
+  async createShellSession(sessionId: string): Promise<ShellSession> {
+    console.log(
+      `🔧 API DEBUG: Creating shell session for session ${sessionId}`
+    );
+    try {
+      const result = await this.request<ShellSession>(
+        `/api/sessions/${sessionId}/shells`,
+        {
+          method: "POST",
+        }
+      );
+      console.log(`🔧 API DEBUG: Successfully created shell session:`, result);
+      return result;
+    } catch (error) {
+      console.error(
+        `🔧 API DEBUG: Failed to create shell session for ${sessionId}:`,
+        error
+      );
+      throw error;
+    }
+  }
+
+  async listShellSessions(sessionId: string): Promise<ShellListResponse> {
+    console.log(
+      `🔧 API DEBUG: Listing shell sessions for session ${sessionId}`
+    );
+    try {
+      const result = await this.request<ShellListResponse>(
+        `/api/sessions/${sessionId}/shells`
+      );
+      console.log(`🔧 API DEBUG: Successfully listed shell sessions:`, result);
+      return result;
+    } catch (error) {
+      console.error(
+        `🔧 API DEBUG: Failed to list shell sessions for ${sessionId}:`,
+        error
+      );
+      throw error;
+    }
+  }
+
+  async deleteShellSession(shellId: string): Promise<{ message: string }> {
+    console.log(`🔧 API DEBUG: Deleting shell session ${shellId}`);
+    try {
+      const result = await this.request<{ message: string }>(
+        `/api/shells/${shellId}`,
+        {
+          method: "DELETE",
+        }
+      );
+      console.log(
+        `🔧 API DEBUG: Successfully deleted shell session ${shellId}:`,
+        result
+      );
+      return result;
+    } catch (error) {
+      console.error(
+        `🔧 API DEBUG: Failed to delete shell session ${shellId}:`,
+        error
+      );
+      throw error;
+    }
   }
 }
 

@@ -7,6 +7,10 @@ import asyncio
 import json
 import uuid
 import os
+import pty
+import signal
+import threading
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, AsyncGenerator
@@ -28,13 +32,223 @@ from agent_platform import (
 )
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# TERMINAL SESSION MANAGEMENT
+# ============================================================================
+
+# Global state for shell sessions
+ACTIVE_SHELLS: Dict[str, Dict[str, Any]] = {}
+
+class ShellSession:
+    def __init__(self, shell_id: str, session_id: str, ctr: docker.models.containers.Container):
+        self.shell_id = shell_id
+        self.session_id = session_id
+        self.container = ctr
+        self.exec_id = None
+        self.websocket = None
+        self.process = None
+        self.created_at = datetime.utcnow()
+        logger.info(f"🐚 DEBUG: Created ShellSession {shell_id} for session {session_id} with container {ctr.id}")
+        
+    async def start_shell(self):
+        """Start a bash shell in the container"""
+        try:
+            logger.info(f"🐚 DEBUG: Starting shell {self.shell_id} for container {self.container.id}")
+            
+            # Check if container is running
+            self.container.reload()
+            logger.info(f"🐚 DEBUG: Container {self.container.id} status: {self.container.status}")
+            
+            if self.container.status != 'running':
+                logger.error(f"🐚 DEBUG: Container {self.container.id} is not running, status: {self.container.status}")
+                return False
+            
+            # Create exec instance with PTY
+            exec_config = {
+                "container": self.container.id,
+                "cmd": ["/bin/bash", "-l"],
+                "stdin": True,
+                "stdout": True,
+                "stderr": True,
+                "tty": True,
+                "workdir": "/code"
+            }
+            logger.info(f"🐚 DEBUG: Creating exec with config: {exec_config}")
+            
+            self.exec_id = self.container.client.api.exec_create(**exec_config)["Id"]
+            
+            logger.info(f"🐚 DEBUG: Successfully created exec {self.exec_id} for shell {self.shell_id}")
+            return True
+        except Exception as e:
+            logger.error(f"🐚 DEBUG: Failed to start shell {self.shell_id}: {e}", exc_info=True)
+            return False
+    
+    async def attach_websocket(self, websocket: WebSocket):
+        """Attach WebSocket to shell for bidirectional communication"""
+        logger.info(f"🔌 DEBUG: Starting WebSocket attachment for shell {self.shell_id}")
+        
+        if not self.exec_id:
+            logger.error(f"🔌 DEBUG: Shell {self.shell_id} not started - no exec_id")
+            raise ValueError("Shell not started")
+        
+        self.websocket = websocket
+        logger.info(f"🔌 DEBUG: WebSocket assigned to shell {self.shell_id}")
+        
+        # Use docker exec command directly via subprocess for better PTY handling
+        docker_cmd = [
+            "docker", "exec", "-it", self.container.id, "/bin/bash", "-l"
+        ]
+        logger.info(f"🔌 DEBUG: Using docker command: {' '.join(docker_cmd)}")
+        
+        try:
+            # Start the process with PTY
+            logger.info(f"🔌 DEBUG: Creating PTY for shell {self.shell_id}")
+            master, slave = pty.openpty()
+            logger.info(f"🔌 DEBUG: PTY created - master: {master}, slave: {slave}")
+            
+            logger.info(f"🔌 DEBUG: Starting subprocess for shell {self.shell_id}")
+            self.process = subprocess.Popen(
+                docker_cmd,
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                preexec_fn=os.setsid
+            )
+            os.close(slave)
+            logger.info(f"🔌 DEBUG: Subprocess started with PID {self.process.pid} for shell {self.shell_id}")
+            
+            # Send connection confirmation
+            logger.info(f"🔌 DEBUG: Sending connection confirmation for shell {self.shell_id}")
+            await websocket.send_json({
+                "type": "shell_connected",
+                "shell_id": self.shell_id,
+                "session_id": self.session_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "message": f"Connected to shell {self.shell_id}"
+            })
+            logger.info(f"🔌 DEBUG: Connection confirmation sent for shell {self.shell_id}")
+            
+            # Start background tasks for bidirectional communication
+            async def read_from_shell():
+                """Read output from shell and send to WebSocket"""
+                logger.info(f"📖 DEBUG: Starting read_from_shell task for shell {self.shell_id}")
+                try:
+                    while True:
+                        # Read from PTY master
+                        try:
+                            logger.debug(f"📖 DEBUG: Attempting to read from PTY master {master} for shell {self.shell_id}")
+                            data = os.read(master, 1024)
+                            if not data:
+                                logger.info(f"📖 DEBUG: No data read from shell {self.shell_id}, breaking")
+                                break
+                            
+                            logger.debug(f"📖 DEBUG: Read {len(data)} bytes from shell {self.shell_id}: {data[:50]}...")
+                            
+                            # Send shell output to WebSocket
+                            message = {
+                                "type": "shell_output",
+                                "data": data.decode('utf-8', errors='ignore'),
+                                "shell_id": self.shell_id
+                            }
+                            logger.debug(f"📖 DEBUG: Sending WebSocket message for shell {self.shell_id}")
+                            await websocket.send_json(message)
+                            logger.debug(f"📖 DEBUG: Successfully sent shell output for shell {self.shell_id}")
+                        except OSError as e:
+                            logger.warning(f"📖 DEBUG: OSError reading from shell {self.shell_id}: {e}")
+                            break
+                        except Exception as e:
+                            logger.error(f"📖 DEBUG: Error reading from shell {self.shell_id}: {e}")
+                            break
+                            
+                except Exception as e:
+                    logger.error(f"📖 DEBUG: Error in read_from_shell for {self.shell_id}: {e}")
+                finally:
+                    logger.info(f"📖 DEBUG: Closing master PTY {master} for shell {self.shell_id}")
+                    try:
+                        os.close(master)
+                    except Exception as e:
+                        logger.warning(f"📖 DEBUG: Error closing master PTY for shell {self.shell_id}: {e}")
+            
+            async def write_to_shell():
+                """Read input from WebSocket and send to shell"""
+                logger.info(f"✍️ DEBUG: Starting write_to_shell task for shell {self.shell_id}")
+                try:
+                    while True:
+                        logger.debug(f"✍️ DEBUG: Waiting for WebSocket message for shell {self.shell_id}")
+                        message = await websocket.receive_text()
+                        logger.debug(f"✍️ DEBUG: Received WebSocket message for shell {self.shell_id}: {message[:100]}...")
+                        data = json.loads(message)
+                        
+                        if data.get("type") == "shell_input":
+                            input_data = data.get("data", "")
+                            logger.debug(f"✍️ DEBUG: Processing shell_input for shell {self.shell_id}: {repr(input_data)}")
+                            try:
+                                os.write(master, input_data.encode('utf-8'))
+                                logger.debug(f"✍️ DEBUG: Successfully wrote input to shell {self.shell_id}")
+                            except OSError as e:
+                                logger.warning(f"✍️ DEBUG: OSError writing to shell {self.shell_id}: {e}")
+                                break
+                            except Exception as e:
+                                logger.warning(f"✍️ DEBUG: Failed to send input to shell {self.shell_id}: {e}")
+                        elif data.get("type") == "shell_resize":
+                            # Handle terminal resize (PTY doesn't support direct resize, 
+                            # but we can send stty commands)
+                            rows = data.get("rows", 24)
+                            cols = data.get("cols", 80)
+                            logger.info(f"✍️ DEBUG: Resizing terminal {self.shell_id} to {cols}x{rows}")
+                            try:
+                                resize_cmd = f"stty rows {rows} cols {cols}\n"
+                                os.write(master, resize_cmd.encode('utf-8'))
+                                logger.debug(f"✍️ DEBUG: Successfully resized terminal {self.shell_id}")
+                            except Exception as e:
+                                logger.warning(f"✍️ DEBUG: Failed to resize terminal {self.shell_id}: {e}")
+                        else:
+                            logger.warning(f"✍️ DEBUG: Unknown message type for shell {self.shell_id}: {data.get('type')}")
+                                
+                except WebSocketDisconnect:
+                    logger.info(f"✍️ DEBUG: WebSocket disconnected for shell {self.shell_id}")
+                except Exception as e:
+                    logger.error(f"✍️ DEBUG: Error writing to shell {self.shell_id}: {e}")
+            
+            # Run both tasks concurrently
+            await asyncio.gather(
+                read_from_shell(),
+                write_to_shell(),
+                return_exceptions=True
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in attach_websocket for {self.shell_id}: {e}")
+            raise
+    
+    def cleanup(self):
+        """Clean up shell resources"""
+        try:
+            if self.process and self.process.poll() is None:
+                # Send SIGTERM to the process group
+                try:
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                except:
+                    pass
+                # Wait a bit then force kill
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                    except:
+                        pass
+        except Exception as e:
+            logger.warning(f"Error cleaning up shell {self.shell_id}: {e}")
 
 # Global state for WebSocket connections
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, List[WebSocket]] = {}
+        self.shell_connections: Dict[str, WebSocket] = {}
     
     async def connect(self, websocket: WebSocket, session_id: str):
         await websocket.accept()
@@ -43,12 +257,25 @@ class ConnectionManager:
         self.active_connections[session_id].append(websocket)
         logger.info(f"WebSocket connected for session {session_id}")
     
+    async def connect_shell(self, websocket: WebSocket, shell_id: str):
+        logger.info(f"🔗 DEBUG: Accepting WebSocket connection for shell {shell_id}")
+        await websocket.accept()
+        self.shell_connections[shell_id] = websocket
+        logger.info(f"🔗 DEBUG: Shell WebSocket connected for shell {shell_id}, total shell connections: {len(self.shell_connections)}")
+    
     def disconnect(self, websocket: WebSocket, session_id: str):
         if session_id in self.active_connections:
             self.active_connections[session_id].remove(websocket)
             if not self.active_connections[session_id]:
                 del self.active_connections[session_id]
-        logger.info(f"WebSocket disconnected for session {session_id}")
+        logger.info(f"🔗 DEBUG: WebSocket disconnected for session {session_id}")
+    
+    def disconnect_shell(self, shell_id: str):
+        if shell_id in self.shell_connections:
+            del self.shell_connections[shell_id]
+            logger.info(f"🔗 DEBUG: Shell WebSocket disconnected for shell {shell_id}, remaining connections: {len(self.shell_connections)}")
+        else:
+            logger.warning(f"🔗 DEBUG: Attempted to disconnect shell {shell_id} but it was not found in connections")
     
     async def send_message(self, message: dict, session_id: str):
         if session_id in self.active_connections:
@@ -107,6 +334,15 @@ class GrepRequest(BaseModel):
 class ShellCommand(BaseModel):
     cmd: str
     tty: bool = True
+
+class ShellSessionCreate(BaseModel):
+    session_id: str
+
+class ShellSessionResponse(BaseModel):
+    shell_id: str
+    session_id: str
+    created: str
+    status: str
 
 # Lifespan context manager
 @asynccontextmanager
@@ -759,6 +995,172 @@ async def execute_shell_command(session_id: str, shell_cmd: ShellCommand):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
+# TERMINAL SESSION ENDPOINTS
+# ============================================================================
+
+@app.post("/api/sessions/{session_id}/shells", response_model=ShellSessionResponse)
+async def create_shell_session(session_id: str):
+    """Create a new shell session for a container"""
+    logger.info(f"🔧 DEBUG: API call to create shell session for session {session_id}")
+    try:
+        # Validate session exists
+        logger.info(f"🔧 DEBUG: Validating session {session_id} exists")
+        session_data = get_session(session_id)
+        if not session_data:
+            logger.error(f"🔧 DEBUG: Session {session_id} not found")
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        workdir, ctr, _ = session_data
+        logger.info(f"🔧 DEBUG: Session {session_id} found with container {ctr.id}")
+        
+        # Generate shell ID
+        shell_id = f"shell_{uuid.uuid4().hex[:8]}"
+        logger.info(f"🔧 DEBUG: Generated shell_id: {shell_id}")
+        
+        # Create shell session
+        logger.info(f"🔧 DEBUG: Creating ShellSession object for {shell_id}")
+        shell_session = ShellSession(shell_id, session_id, ctr)
+        
+        logger.info(f"🔧 DEBUG: Starting shell for {shell_id}")
+        success = await shell_session.start_shell()
+        
+        if not success:
+            logger.error(f"🔧 DEBUG: Failed to start shell {shell_id}")
+            raise HTTPException(status_code=500, detail="Failed to start shell")
+        
+        # Store in global state
+        logger.info(f"🔧 DEBUG: Storing shell {shell_id} in ACTIVE_SHELLS")
+        ACTIVE_SHELLS[shell_id] = {
+            "shell_id": shell_id,
+            "session_id": session_id,
+            "created": datetime.utcnow().isoformat(),
+            "status": "active",
+            "shell_session": shell_session
+        }
+        
+        logger.info(f"🔧 DEBUG: Successfully created shell session {shell_id} for session {session_id}")
+        logger.info(f"🔧 DEBUG: Total active shells: {len(ACTIVE_SHELLS)}")
+        
+        return ShellSessionResponse(
+            shell_id=shell_id,
+            session_id=session_id,
+            created=ACTIVE_SHELLS[shell_id]["created"],
+            status="active"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"🔧 DEBUG: Error creating shell session for {session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/sessions/{session_id}/shells")
+async def list_shell_sessions(session_id: str):
+    """List all shell sessions for a session"""
+    try:
+        # Validate session exists
+        session_data = get_session(session_id)
+        if not session_data:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Filter shells for this session
+        session_shells = []
+        for shell_id, shell_data in ACTIVE_SHELLS.items():
+            if shell_data["session_id"] == session_id:
+                session_shells.append({
+                    "shell_id": shell_id,
+                    "session_id": session_id,
+                    "created": shell_data["created"],
+                    "status": shell_data["status"]
+                })
+        
+        return {"shells": session_shells}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing shells for session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/shells/{shell_id}")
+async def delete_shell_session(shell_id: str):
+    """Delete a shell session"""
+    try:
+        if shell_id not in ACTIVE_SHELLS:
+            raise HTTPException(status_code=404, detail="Shell session not found")
+        
+        shell_data = ACTIVE_SHELLS[shell_id]
+        shell_session = shell_data["shell_session"]
+        
+        # Cleanup shell
+        shell_session.cleanup()
+        
+        # Remove from global state
+        del ACTIVE_SHELLS[shell_id]
+        
+        # Disconnect WebSocket if connected
+        manager.disconnect_shell(shell_id)
+        
+        logger.info(f"Deleted shell session {shell_id}")
+        return {"message": f"Shell session {shell_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting shell session {shell_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# TERMINAL WEBSOCKET ENDPOINT
+# ============================================================================
+
+@app.websocket("/ws/shells/{shell_id}")
+async def shell_websocket_endpoint(websocket: WebSocket, shell_id: str):
+    """WebSocket endpoint for interactive shell communication"""
+    logger.info(f"🌐 DEBUG: WebSocket connection attempt for shell {shell_id}")
+    try:
+        # Validate shell exists
+        logger.info(f"🌐 DEBUG: Validating shell {shell_id} exists in ACTIVE_SHELLS")
+        logger.info(f"🌐 DEBUG: Current ACTIVE_SHELLS keys: {list(ACTIVE_SHELLS.keys())}")
+        
+        if shell_id not in ACTIVE_SHELLS:
+            logger.error(f"🌐 DEBUG: Shell {shell_id} not found in ACTIVE_SHELLS")
+            await websocket.close(code=1008, reason="Shell session not found")
+            return
+        
+        shell_data = ACTIVE_SHELLS[shell_id]
+        shell_session = shell_data["shell_session"]
+        logger.info(f"🌐 DEBUG: Found shell {shell_id} with session {shell_session.session_id}")
+        
+        # Connect to shell WebSocket
+        logger.info(f"🌐 DEBUG: Accepting WebSocket connection for shell {shell_id}")
+        await manager.connect_shell(websocket, shell_id)
+        logger.info(f"🌐 DEBUG: WebSocket connection accepted for shell {shell_id}")
+        
+        # Send connection confirmation
+        logger.info(f"🌐 DEBUG: Sending initial connection message for shell {shell_id}")
+        await websocket.send_json({
+            "type": "shell_connected",
+            "shell_id": shell_id,
+            "session_id": shell_session.session_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "message": f"Connected to shell {shell_id}"
+        })
+        logger.info(f"🌐 DEBUG: Initial connection message sent for shell {shell_id}")
+        
+        # Start shell communication
+        logger.info(f"🌐 DEBUG: Starting shell communication for shell {shell_id}")
+        await shell_session.attach_websocket(websocket)
+        
+    except WebSocketDisconnect:
+        logger.info(f"🌐 DEBUG: Shell WebSocket disconnected for {shell_id}")
+        manager.disconnect_shell(shell_id)
+    except Exception as e:
+        logger.error(f"🌐 DEBUG: Shell WebSocket error for {shell_id}: {e}", exc_info=True)
+        try:
+            await websocket.close(code=1011, reason=f"Internal error: {str(e)}")
+        except Exception as close_error:
+            logger.warning(f"🌐 DEBUG: Error closing WebSocket for shell {shell_id}: {close_error}")
+        manager.disconnect_shell(shell_id)
+
+# ============================================================================
 # HEALTH CHECK
 # ============================================================================
 
@@ -775,6 +1177,7 @@ async def health_check():
             "status": "healthy",
             "timestamp": datetime.utcnow().isoformat(),
             "active_sessions": len(active_sessions),
+            "active_shells": len(ACTIVE_SHELLS),
             "docker_available": True
         }
     except Exception as e:

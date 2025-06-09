@@ -9,6 +9,7 @@ import type {
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
 import { ConversationWorkflow } from "@/components/ConversationWorkflow";
+import { TerminalManager } from "@/components/TerminalManager";
 
 // Event types for the activity timeline
 export interface ProcessedEvent {
@@ -30,6 +31,7 @@ export default function App() {
   >([]);
   const [currentOutput, setCurrentOutput] = useState<string>("");
   const [showWorkflow, setShowWorkflow] = useState(false);
+  const [showTerminals, setShowTerminals] = useState(false);
   const [workflowData, setWorkflowData] = useState<ConversationHistoryItem[]>(
     []
   );
@@ -330,12 +332,21 @@ export default function App() {
           </button>
 
           {currentSession && (
-            <button
-              onClick={() => setShowWorkflow(!showWorkflow)}
-              className="mt-2 w-full px-3 py-2 bg-purple-600 hover:bg-purple-700 rounded-md text-sm font-medium transition-colors"
-            >
-              {showWorkflow ? "Hide Workflow" : "Show Workflow"}
-            </button>
+            <>
+              <button
+                onClick={() => setShowWorkflow(!showWorkflow)}
+                className="mt-2 w-full px-3 py-2 bg-purple-600 hover:bg-purple-700 rounded-md text-sm font-medium transition-colors"
+              >
+                {showWorkflow ? "Hide Workflow" : "Show Workflow"}
+              </button>
+
+              <button
+                onClick={() => setShowTerminals(!showTerminals)}
+                className="mt-2 w-full px-3 py-2 bg-green-600 hover:bg-green-700 rounded-md text-sm font-medium transition-colors"
+              >
+                {showTerminals ? "Hide Terminals" : "Show Terminals"}
+              </button>
+            </>
           )}
         </div>
 
@@ -412,6 +423,11 @@ export default function App() {
             <ConversationWorkflow
               conversationHistory={workflowData}
               sessionId={currentSession.session_id}
+            />
+          ) : showTerminals && currentSession ? (
+            <TerminalManager
+              sessionId={currentSession.session_id}
+              isVisible={showTerminals}
             />
           ) : (
             <ChatMessagesView

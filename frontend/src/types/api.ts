@@ -91,6 +91,50 @@ export interface ShellResponse {
   timestamp: string;
 }
 
+// Terminal Shell Session Types
+export interface ShellSession {
+  shell_id: string;
+  session_id: string;
+  created: string;
+  status: string;
+}
+
+export interface ShellSessionCreate {
+  session_id: string;
+}
+
+export interface ShellListResponse {
+  shells: ShellSession[];
+}
+
+// Terminal WebSocket Events
+export interface ShellOutputEvent {
+  type: "shell_output";
+  data: string;
+  shell_id: string;
+}
+
+export interface ShellConnectedEvent {
+  type: "shell_connected";
+  shell_id: string;
+  session_id: string;
+  timestamp: string;
+  message: string;
+}
+
+export interface ShellInputMessage {
+  type: "shell_input";
+  data: string;
+}
+
+export interface ShellResizeMessage {
+  type: "shell_resize";
+  rows: number;
+  cols: number;
+}
+
+export type ShellWSEventUnion = ShellOutputEvent | ShellConnectedEvent;
+
 // Process Management Types
 export interface ProcessLogsResponse {
   logs: string;

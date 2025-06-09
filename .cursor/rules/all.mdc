@@ -1,0 +1,22 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+As an agent working on this project, you must follow a disciplined and structured workflow. Never attempt to run the project servers yourself, as they are usually already running in a separate terminal. Doing so may cause port conflicts and disrupt your environment.
+
+Before beginning any task, open the terminal and run the date command to record the exact start time. This timestamp must be used to create a task file within the taskmanager/ directory. The filename should follow the format YYYY-MM-DD-taskname.taskfile.md. Each task file must include the start time, a brief description of the task, a breakdown of steps taken, a list of modified files (if any), relevant command outputs or test results, and the exact end time (also captured using the date command). Calculate and log the duration of the task. Mark the task status clearly using ✅ for completed, 🔄 for in progress, or ❌ for failed. Once completed, add a one-line summary of the task to taskmanager/alltasks.txt.
+
+Do not reuse, delete, or modify existing task files. Treat each as a permanent record. Keep the taskmanager/ directory tidy and organized, archiving older files when necessary. Avoid storing unrelated content in this folder.
+
+This project is structured as a single Git repository (monorepo) that hosts both the backend and frontend code. The backend code resides in the backend/ directory (FastAPI), the frontend code in the frontend/ directory (React/TypeScript), and the root directory contains documentation, task files, and shared configuration. Before committing code, always confirm your working directory using pwd and verify you are in the correct repository using git remote -v. You can commit from any directory within the repository, but be mindful of what files you are adding. Use git add with specific files or directories rather than git add . from the root to avoid accidentally committing unintended files.
+
+Maintain high standards of code quality. For the FastAPI backend, write clean, asynchronous functions with proper documentation and error handling. For the React/TypeScript frontend, use typed interfaces, well-structured components, proper state management, and user-friendly error messages. Avoid unstructured, ambiguous, or untyped code at all costs.
+
+Robust error handling is essential on both frontend and backend. Python code should gracefully handle exceptions, log errors, and give meaningful feedback. In the frontend, wrap risky operations in try-catch blocks, use error boundaries, and show helpful messages to the user.
+
+In all your work, your primary responsibility is to contribute clean, efficient, and well-documented code, mapped clearly to the task it belongs to, and committed within the repository with appropriate commit messages. Task logging, repository discipline, and code clarity are not optional — they are critical to the success and maintainability of the Crogia project.
+
+AFTER EVERY TASK, OR CHANGES MADE ALWAYS COMMIT TO GIT WITH THE APPROPRIATE MESSAGES. ALWAYS ALWAYS ALWAYS COMMIT TO GIT. THIS IS VERY IMPORTANT. Since this is a monorepo, make sure your commit messages clearly indicate which part of the project was modified (backend/, frontend/, or root-level changes).
+
+For tracking tasks, always read the taskmanager/alltasks.txt so you have awareness of what has been happening.... 
