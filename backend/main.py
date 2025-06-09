@@ -136,8 +136,18 @@ class ShellSession:
                 """Read output from shell and send to WebSocket"""
                 logger.info(f"📖 DEBUG: Starting read_from_shell task for shell {self.shell_id}")
                 try:
+                    # Set PTY master to non-blocking mode
+                    import fcntl
+                    flags = fcntl.fcntl(master, fcntl.F_GETFL)
+                    fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                    logger.info(f"📖 DEBUG: Set PTY master {master} to non-blocking mode for shell {self.shell_id}")
+                    
                     while True:
-                        # Read from PTY master
+                        # Check if WebSocket is still connected
+                        if not websocket or websocket.client_state.name != 'CONNECTED':
+                            logger.info(f"📖 DEBUG: WebSocket disconnected, stopping read task for shell {self.shell_id}")
+                            break
+                            
                         try:
                             logger.debug(f"📖 DEBUG: Attempting to read from PTY master {master} for shell {self.shell_id}")
                             data = os.read(master, 1024)
@@ -156,6 +166,11 @@ class ShellSession:
                             logger.debug(f"📖 DEBUG: Sending WebSocket message for shell {self.shell_id}")
                             await websocket.send_json(message)
                             logger.debug(f"📖 DEBUG: Successfully sent shell output for shell {self.shell_id}")
+                        except BlockingIOError:
+                            # No data available, wait a bit and try again
+                            logger.debug(f"📖 DEBUG: No data available from PTY for shell {self.shell_id}, waiting...")
+                            await asyncio.sleep(0.01)  # Small delay to prevent busy waiting
+                            continue
                         except OSError as e:
                             logger.warning(f"📖 DEBUG: OSError reading from shell {self.shell_id}: {e}")
                             break
@@ -214,11 +229,28 @@ class ShellSession:
                     logger.error(f"✍️ DEBUG: Error writing to shell {self.shell_id}: {e}")
             
             # Run both tasks concurrently
-            await asyncio.gather(
-                read_from_shell(),
-                write_to_shell(),
-                return_exceptions=True
-            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        read_from_shell(),
+                        write_to_shell(),
+                        return_exceptions=True
+                    ),
+                    timeout=300  # 5 minute timeout to prevent hanging
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"🔌 DEBUG: Shell communication timed out for shell {self.shell_id}")
+            except Exception as e:
+                logger.error(f"🔌 DEBUG: Error in shell communication tasks for shell {self.shell_id}: {e}")
+            finally:
+                logger.info(f"🔌 DEBUG: Shell communication ended for shell {self.shell_id}")
+                # Ensure PTY is cleaned up
+                try:
+                    if master:
+                        os.close(master)
+                        logger.info(f"🔌 DEBUG: Closed PTY master {master} for shell {self.shell_id}")
+                except:
+                    pass
             
         except Exception as e:
             logger.error(f"Error in attach_websocket for {self.shell_id}: {e}")
