@@ -1,2 +1,3 @@
 2025-06-06: Implemented comprehensive improvements to agent platform with enhanced system prompt, better code organization, and improved error handling
-2025-06-06: Fixed prompt in v1.5.py by removing build_agent function and passing tools directly to agent for autonomous operation 
+2025-06-06: Fixed prompt in v1.5.py by removing build_agent function and passing tools directly to agent for autonomous operation
+2025-06-09: Implemented conversation workflow rendering with tool calls, reasoning steps, and rich visual timeline for agent session analysis 
