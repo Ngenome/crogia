@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -9,20 +9,50 @@ import "@xterm/xterm/css/xterm.css";
 interface TerminalProps {
   shellSession: ShellSession;
   onClose?: () => void;
+  onShellDead?: (deadShellId: string) => void;
 }
 
-export function Terminal({ shellSession, onClose }: TerminalProps) {
+export function Terminal({
+  shellSession,
+  onClose,
+  onShellDead,
+}: TerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const websocketRef = useRef<TerminalWebSocket | null>(null);
+  const initializingRef = useRef<boolean>(false);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  console.log(
+    `🖥️ TERMINAL DEBUG: Terminal component rendered for shell ${shellSession.shell_id}`
+  );
+
+  const handleShellDead = useCallback(
+    (deadShellId: string) => {
+      console.log(
+        `💀 TERMINAL DEBUG: Shell ${deadShellId} died, notifying parent component`
+      );
+      if (onShellDead) {
+        onShellDead(deadShellId);
+      }
+    },
+    [onShellDead]
+  );
 
   useEffect(() => {
     console.log(
       `🖥️ TERMINAL DEBUG: Initializing terminal for shell ${shellSession.shell_id}`
     );
+
+    // Prevent multiple initializations
+    if (initializingRef.current) {
+      console.log(
+        `🖥️ TERMINAL DEBUG: Already initializing terminal for shell ${shellSession.shell_id}, skipping`
+      );
+      return;
+    }
 
     if (!terminalRef.current) {
       console.error(
@@ -30,6 +60,8 @@ export function Terminal({ shellSession, onClose }: TerminalProps) {
       );
       return;
     }
+
+    initializingRef.current = true;
 
     console.log(
       `🖥️ TERMINAL DEBUG: Creating XTerm instance for shell ${shellSession.shell_id}`
@@ -127,7 +159,7 @@ export function Terminal({ shellSession, onClose }: TerminalProps) {
     console.log(
       `🖥️ TERMINAL DEBUG: Creating WebSocket connection for shell ${shellSession.shell_id}`
     );
-    const ws = new TerminalWebSocket();
+    const ws = new TerminalWebSocket(handleShellDead);
     websocketRef.current = ws;
 
     // Handle terminal input
@@ -258,6 +290,7 @@ export function Terminal({ shellSession, onClose }: TerminalProps) {
       console.log(
         `🖥️ TERMINAL DEBUG: Cleaning up terminal for shell ${shellSession.shell_id}`
       );
+      initializingRef.current = false;
       window.removeEventListener("resize", handleResize);
       if (ws) {
         console.log(

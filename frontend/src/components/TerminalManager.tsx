@@ -151,6 +151,58 @@ export function TerminalManager({
     closeTerminal(shellId);
   }, []);
 
+  // Handle shell death - create new shell to replace the dead one
+  const handleShellDead = useCallback(
+    async (deadShellId: string) => {
+      console.log(
+        `💀 MANAGER DEBUG: Shell ${deadShellId} died, creating replacement`
+      );
+
+      // Remove the dead shell from our list
+      setShellSessions((prev) => {
+        const filtered = prev.filter((shell) => shell.shell_id !== deadShellId);
+        console.log(
+          `💀 MANAGER DEBUG: Removed dead shell ${deadShellId}, remaining:`,
+          filtered.map((s) => s.shell_id)
+        );
+        return filtered;
+      });
+
+      // Create a new shell to replace it
+      try {
+        console.log(
+          `💀 MANAGER DEBUG: Creating replacement shell for session ${sessionId}`
+        );
+        const newShell = await api.createShellSession(sessionId);
+        console.log(`💀 MANAGER DEBUG: Replacement shell created:`, newShell);
+
+        setShellSessions((prev) => {
+          const updated = [...prev, newShell];
+          console.log(
+            `💀 MANAGER DEBUG: Added replacement shell:`,
+            updated.map((s) => s.shell_id)
+          );
+          return updated;
+        });
+
+        // Switch to the new shell if the dead one was active
+        if (activeTab === deadShellId) {
+          console.log(
+            `💀 MANAGER DEBUG: Setting active tab to replacement shell: ${newShell.shell_id}`
+          );
+          setActiveTab(newShell.shell_id);
+        }
+      } catch (err) {
+        console.error(
+          `💀 MANAGER DEBUG: Failed to create replacement shell for ${deadShellId}:`,
+          err
+        );
+        setError("Failed to create replacement terminal");
+      }
+    },
+    [sessionId, activeTab]
+  );
+
   if (!isVisible) {
     console.log(
       `📋 MANAGER DEBUG: TerminalManager not visible, returning null`
@@ -285,6 +337,7 @@ export function TerminalManager({
                       );
                       handleTerminalClose(shell.shell_id);
                     }}
+                    onShellDead={handleShellDead}
                   />
                 </TabsContent>
               );

@@ -99,8 +99,10 @@ class ShellSession:
         logger.info(f"🔌 DEBUG: WebSocket assigned to shell {self.shell_id}")
         
         # Use docker exec command directly via subprocess for better PTY handling
+        # Use explicit login shell with proper environment setup
         docker_cmd = [
-            "docker", "exec", "-it", self.container.id, "/bin/bash", "-l"
+            "docker", "exec", "-it", self.container.id, 
+            "/bin/bash", "--login", "-i"
         ]
         logger.info(f"🔌 DEBUG: Using docker command: {' '.join(docker_cmd)}")
         
@@ -109,6 +111,11 @@ class ShellSession:
             logger.info(f"🔌 DEBUG: Creating PTY for shell {self.shell_id}")
             master, slave = pty.openpty()
             logger.info(f"🔌 DEBUG: PTY created - master: {master}, slave: {slave}")
+            
+            # Set PTY to non-blocking mode before starting subprocess
+            flags = fcntl.fcntl(master, fcntl.F_GETFL)
+            fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            logger.info(f"🔌 DEBUG: Set PTY master {master} to non-blocking mode")
             
             logger.info(f"🔌 DEBUG: Starting subprocess for shell {self.shell_id}")
             self.process = subprocess.Popen(
@@ -121,6 +128,9 @@ class ShellSession:
             os.close(slave)
             logger.info(f"🔌 DEBUG: Subprocess started with PID {self.process.pid} for shell {self.shell_id}")
             
+            # Give the shell a moment to start and generate prompt
+            await asyncio.sleep(0.1)
+            
             # Send connection confirmation
             logger.info(f"🔌 DEBUG: Sending connection confirmation for shell {self.shell_id}")
             await websocket.send_json({
@@ -131,16 +141,30 @@ class ShellSession:
                 "message": f"Connected to shell {self.shell_id}"
             })
             logger.info(f"🔌 DEBUG: Connection confirmation sent for shell {self.shell_id}")
+
+            # Send a test output message to verify the pipeline works
+            await websocket.send_json({
+                "type": "shell_output",
+                "data": f"\r\n\x1b[32m=== Welcome to shell {self.shell_id} ===\x1b[0m\r\n\r\n",
+                "shell_id": self.shell_id
+            })
+            logger.info(f"🔌 DEBUG: Test welcome message sent for shell {self.shell_id}")
             
             # Start background tasks for bidirectional communication
             async def read_from_shell():
                 """Read output from shell and send to WebSocket"""
                 logger.info(f"📖 DEBUG: Starting read_from_shell task for shell {self.shell_id}")
                 try:
-                    # Set PTY master to non-blocking mode
-                    flags = fcntl.fcntl(master, fcntl.F_GETFL)
-                    fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-                    logger.info(f"📖 DEBUG: Set PTY master {master} to non-blocking mode for shell {self.shell_id}")
+                    # First, try to trigger initial output by sending commands that will definitely produce output
+                    try:
+                        # Send commands that will definitely produce output
+                        os.write(master, b"clear; echo 'Shell ready:'; pwd; echo -n '$ '\n")
+                        logger.info(f"📖 DEBUG: Sent initial commands to trigger output for shell {self.shell_id}")
+                    except Exception as e:
+                        logger.warning(f"📖 DEBUG: Could not send initial commands: {e}")
+                    
+                    # Wait longer for the shell to respond and produce output
+                    await asyncio.sleep(0.5)
                     
                     while True:
                         # Check if WebSocket is still connected
@@ -150,26 +174,27 @@ class ShellSession:
                             
                         try:
                             logger.debug(f"📖 DEBUG: Attempting to read from PTY master {master} for shell {self.shell_id}")
-                            data = os.read(master, 1024)
+                            data = os.read(master, 4096)  # Increased buffer size
                             if not data:
                                 logger.info(f"📖 DEBUG: No data read from shell {self.shell_id}, breaking")
                                 break
                             
-                            logger.debug(f"📖 DEBUG: Read {len(data)} bytes from shell {self.shell_id}: {data[:50]}...")
+                            decoded_data = data.decode('utf-8', errors='ignore')
+                            logger.info(f"📖 DEBUG: Read {len(data)} bytes from shell {self.shell_id}: {repr(decoded_data[:100])}")
                             
                             # Send shell output to WebSocket
                             message = {
                                 "type": "shell_output",
-                                "data": data.decode('utf-8', errors='ignore'),
+                                "data": decoded_data,
                                 "shell_id": self.shell_id
                             }
                             logger.debug(f"📖 DEBUG: Sending WebSocket message for shell {self.shell_id}")
                             await websocket.send_json(message)
-                            logger.debug(f"📖 DEBUG: Successfully sent shell output for shell {self.shell_id}")
+                            logger.info(f"📖 DEBUG: Successfully sent shell output for shell {self.shell_id}")
                         except BlockingIOError:
                             # No data available, wait a bit and try again
                             logger.debug(f"📖 DEBUG: No data available from PTY for shell {self.shell_id}, waiting...")
-                            await asyncio.sleep(0.01)  # Small delay to prevent busy waiting
+                            await asyncio.sleep(0.05)  # Slightly longer delay
                             continue
                         except OSError as e:
                             logger.warning(f"📖 DEBUG: OSError reading from shell {self.shell_id}: {e}")
@@ -1163,6 +1188,19 @@ async def shell_websocket_endpoint(websocket: WebSocket, shell_id: str):
         shell_session = shell_data["shell_session"]
         logger.info(f"🌐 DEBUG: Found shell {shell_id} with session {shell_session.session_id}")
         
+        # Check if shell already has an active WebSocket connection
+        if shell_session.websocket is not None:
+            logger.warning(f"🌐 DEBUG: Shell {shell_id} already has an active WebSocket connection, replacing it")
+            # Instead of rejecting, replace the old connection with the new one
+            try:
+                old_websocket = shell_session.websocket
+                shell_session.websocket = None  # Clear reference first
+                await old_websocket.close(code=1000, reason="Replaced by new connection")
+                logger.info(f"🌐 DEBUG: Successfully closed old WebSocket for shell {shell_id}")
+            except Exception as e:
+                logger.warning(f"🌐 DEBUG: Failed to close old WebSocket for shell {shell_id}: {e}")
+            # Continue with new connection
+        
         # Connect to shell WebSocket
         logger.info(f"🌐 DEBUG: Accepting WebSocket connection for shell {shell_id}")
         await manager.connect_shell(websocket, shell_id)
@@ -1194,6 +1232,11 @@ async def shell_websocket_endpoint(websocket: WebSocket, shell_id: str):
     finally:
         # Clean up WebSocket connection
         manager.disconnect_shell(shell_id)
+        
+        # Clear websocket reference from shell session
+        if shell_session:
+            logger.info(f"🌐 DEBUG: Clearing WebSocket reference for shell {shell_id}")
+            shell_session.websocket = None
         
         # Clean up shell session if needed
         if shell_session:

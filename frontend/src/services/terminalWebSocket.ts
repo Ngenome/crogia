@@ -14,6 +14,11 @@ export class TerminalWebSocket {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 3;
   private reconnectDelay = 1000;
+  private onShellDead?: (shellId: string) => void;
+
+  constructor(onShellDead?: (shellId: string) => void) {
+    this.onShellDead = onShellDead;
+  }
 
   connect(shellId: string): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -75,6 +80,15 @@ export class TerminalWebSocket {
             wasClean: event.wasClean,
           });
 
+          // Check for specific error codes that indicate shell doesn't exist
+          if (event.code === 1008 || event.code === 403) {
+            console.log(
+              `🔌 TERMINAL DEBUG: Shell ${shellId} not found on backend (code: ${event.code})`
+            );
+            this.handleShellDead();
+            return;
+          }
+
           if (
             !event.wasClean &&
             this.reconnectAttempts < this.maxReconnectAttempts
@@ -83,6 +97,11 @@ export class TerminalWebSocket {
               `🔌 TERMINAL DEBUG: Connection was not clean, attempting reconnect`
             );
             this.attemptReconnect();
+          } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            console.log(
+              `🔌 TERMINAL DEBUG: Max reconnect attempts reached for shell ${shellId}`
+            );
+            this.handleShellDead();
           } else {
             console.log(
               `🔌 TERMINAL DEBUG: Not attempting reconnect (wasClean: ${event.wasClean}, attempts: ${this.reconnectAttempts})`
@@ -321,5 +340,15 @@ export class TerminalWebSocket {
       default:
         return "unknown";
     }
+  }
+
+  private handleShellDead(): void {
+    console.log(
+      `💀 TERMINAL DEBUG: Shell ${this.shellId} is dead, notifying parent`
+    );
+    if (this.onShellDead && this.shellId) {
+      this.onShellDead(this.shellId);
+    }
+    this.disconnect();
   }
 }
