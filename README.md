@@ -8,7 +8,7 @@ A full-stack platform for managing autonomous development agents with real-time 
 crogia/
 ├── backend/          # FastAPI backend with agent management
 │   ├── main.py       # FastAPI application with REST API & WebSocket
-│   ├── agent_platform.py  # Core agent platform (copied from v1.5.py)
+│   ├── agent_platform.py  # Core agent platform 
 │   ├── config.py     # Configuration management
 │   ├── run.py        # Server startup script
 │   ├── start.sh      # Bash startup script
@@ -17,7 +17,7 @@ crogia/
 │   ├── env.example   # Environment variables template
 │   ├── README.md     # Backend documentation
 │   └── API_DOCS.md   # Comprehensive API documentation
-└── frontend/         # React/TypeScript frontend (existing)
+└── frontend/         # React/TypeScript frontend
     ├── src/
     ├── public/
     ├── package.json
@@ -247,4 +247,4 @@ ws.onmessage = (event) => {
 
 ---
 
-**Built with ❤️ using FastAPI, React, and Docker**
+**FastAPI, React, and Docker etc...**
