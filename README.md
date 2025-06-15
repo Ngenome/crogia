@@ -244,9 +244,6 @@ ws.onmessage = (event) => {
 4. Test thoroughly
 5. Submit a pull request
 
-## 📄 License
-
-[Add your license here]
 
 ---
 
